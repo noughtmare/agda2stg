@@ -17,7 +17,7 @@ import Agda.Syntax.Treeless ( EvaluationStrategy(..) )
 import Agda.TypeChecking.Pretty
 
 import Agda.Utils.Either
-import Agda.Utils.Functor
+import Agda.Utils.Functor hiding ((<.>))
 import Agda.Utils.Null
 import Agda.Syntax.Common.Pretty ( prettyShow )
 
@@ -39,9 +39,9 @@ import qualified Data.Text.IO as T
 import GHC.Generics ( Generic )
 import GHC.Stg.Syntax (pprStgTopBinding, StgPprOpts (StgPprOpts))
 import GHC.Driver.Ppr (showSDocUnsafe)
-import GHC.Utils.Logger (initLogger)
-import GHC (mkModule, mkModuleName, runGhc)
-import GHC.Unit (mainUnit)
+import GHC.Utils.Logger (initLogger, HasLogger (getLogger))
+import GHC (mkModule, mkModuleName, runGhc, ModLocation (..), moduleNameSlashes, moduleName, setUnitDynFlags, getSessionDynFlags, setSessionDynFlags, GhcMonad (getSession))
+import GHC.Unit (mainUnit, GenericUnitInfo (unitId))
 import GHC.Driver.DynFlags (defaultDynFlags, initDynFlags, targetProfile)
 import GHC.Driver.Main (initHscEnv, doCodeGen)
 import GHC.Driver.Env (HscEnv(hsc_dflags, hsc_llvm_config, hsc_tmpfs), hsc_units)
@@ -51,6 +51,13 @@ import GHC.Types.IPE (emptyInfoTableProvMap)
 import GHC.Cmm.Info (cmmToRawCmm)
 import GHC.Platform.Profile (Profile(Profile))
 import GHC.Driver.CodeOutput (codeOutput)
+import GHC.Unit.Finder
+import GHC.Driver.Config.Finder (initFinderOpts)
+
+import System.OsPath
+import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
+import Data.Unique (newUnique)
+import GHC.Cmm.UniqueRenamer (initDUniqSupply)
 
 main :: IO ()
 main = runAgda [backend]
@@ -93,43 +100,61 @@ stgPostModule opts _ isMain modName defs = do
 
   let defToText _ = "" -- encodeOne printer . fromRich
       fileName  = prettyShow (NE.last $ moduleNameParts modName) ++ ".stg"
+      this_mod = mkModule mainUnit (mkModuleName (prettyShow modName))
 
-  modText <- runToStgM opts $ do
-    -- ps  <- stgPreamble
+  modText <- runToStgM opts this_mod $ do
+    -- init
+    dflags <- liftGhc getSessionDynFlags
+    liftGhc $ setSessionDynFlags dflags
+    logger <- liftGhc getLogger
+
+    -- Convert Agda definitions to STG
+    -- TODO? stgPreamble
     stg_binds <- catMaybes <$> traverse (\x -> liftIO (putStrLn "another def") >> defToStg x) (map snd defs)
     liftIO $ putStrLn "Done generating STG"
 
     -- Rest of the GHC pipeline
-    liftIO $ do
-      logger <- initLogger
-      hsc_env <- initHscEnv Nothing
 
-      let
-        ic_inscope = [] -- in-scope variables from GHCi 
-        dflags = hsc_dflags hsc_env
-        for_bytecode = False
-        this_mod = mkModule mainUnit (mkModuleName (prettyShow modName))
+    let
+      ic_inscope = [] -- in-scope variables from GHCi 
+      for_bytecode = False
 
-      -- First optimize and transform STG
-      (stg_binds_with_fvs, stg_cg_info) <- stg2stg logger ic_inscope (initStgPipelineOpts dflags for_bytecode) this_mod stg_binds
+    -- First optimize and transform STG
+    (stg_binds_with_fvs, stg_cg_info) <- liftIO $ stg2stg logger ic_inscope (initStgPipelineOpts dflags for_bytecode) this_mod stg_binds
 
-      let (stg_binds, _stg_deps) = unzip stg_binds_with_fvs
-      
-      -- -- Generate C--
-      -- let data_tycons = [] -- TODO
-      -- 
-      -- !cmms <- doCodeGen hsc_env this_mod emptyInfoTableProvMap [] mempty stg_binds
-      -- rawccms0 <- cmmToRawCmm logger (targetProfile dflags) cmms
-      -- 
-      -- let dependencies = mempty -- TODO
-      -- 
-      -- -- Output ASM
-      -- (output_filename, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos)
-      --    <- codeOutput logger (hsc_tmpfs hsc_env) (hsc_llvm_config hsc_env) dflags (hsc_units hsc_env) this_mod fileName _mod_location _foreign_stubs _foreign_files dependencies _uniqsupply rawccms0
+    let (!stg_binds, _stg_deps) = unzip stg_binds_with_fvs
+    
+    -- Generate C--
+    let data_tycons = [] -- TODO
 
-      return $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
+    !hsc_env <- liftGhc getSession
+    
+    !cmms <- liftIO $ doCodeGen hsc_env this_mod emptyInfoTableProvMap [] mempty stg_binds
+    !rawccms0 <- liftIO $ cmmToRawCmm logger (targetProfile dflags) cmms
+    
+    !mod_basename <- liftIO $ encodeFS $ moduleNameSlashes $ moduleName this_mod
+    !agdaSuf <- liftIO $ encodeFS "agda"
 
-  -- TODO: rest of the pipeline
+    let 
+      dependencies = mempty -- TODO
+      fopts = initFinderOpts dflags
+      mod_location = OsPathModLocation
+        { ml_hs_file_ospath = Just (mod_basename <.> agdaSuf)
+        , ml_hi_file_ospath = mod_basename <.> finder_hiSuf fopts
+        , ml_dyn_hi_file_ospath = mod_basename <.> finder_dynHiSuf fopts
+        , ml_obj_file_ospath = mod_basename <.> finder_objectSuf fopts
+        , ml_dyn_obj_file_ospath = mod_basename <.> finder_dynObjectSuf fopts
+        , ml_hie_file_ospath = mod_basename <.> finder_hieSuf fopts
+        }
+      foreign_stubs _ = NoStubs
+      foreign_files = []
+      duniqsupply = initDUniqSupply 'a' 0
+    
+    -- Output ASM (?)
+    (!output_filename, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos)
+        <- liftIO $ codeOutput logger (hsc_tmpfs hsc_env) (hsc_llvm_config hsc_env) dflags (hsc_units hsc_env) this_mod fileName mod_location foreign_stubs foreign_files dependencies duniqsupply rawccms0
+
+    return $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
 
 
 
@@ -163,7 +188,7 @@ stgPostModule opts _ isMain modName defs = do
 
   liftIO $ putStrLn "Writing output..."
 
-  liftIO $ T.writeFile fileName modText
+  liftIO $ T.writeFile fileName $! modText
 
   where
     -- printer :: SExprPrinter Text (SExpr Text)

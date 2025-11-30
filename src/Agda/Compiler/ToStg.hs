@@ -1,8 +1,17 @@
 {-# LANGUAGE RecursiveDo #-}
 {-# OPTIONS_GHC -Wall #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 module Agda.Compiler.ToStg where
 
-import Prelude hiding ( null , empty )
+import Prelude hiding (null, empty, mod)
+
+
+import qualified GHC
+import qualified GHC.Driver.Monad as GHC
+import qualified GHC.Unit.Module as GHC
+
+import qualified Control.Exception as ControlException
+import Control.Monad.Catch
 
 import Agda.Compiler.Common
 import Agda.Compiler.Erase ( runE , erasable , getFunInfo )
@@ -17,7 +26,7 @@ import qualified Agda.Syntax.Internal as I
 import Agda.Syntax.Literal
 import Agda.Syntax.Treeless
 
-import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Monad hiding (liftTCM)
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Primitive.Base
 
@@ -67,15 +76,16 @@ import GHC.Tc.TyCl.Build (newTyConRepName)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Id.Make (mkDataConWorkId)
 import Data.Traversable (for)
-import GHC.Types.Name as GHC (mkInternalName, mkOccName, varName, NameSpace, tcName, dataName)
+import GHC.Types.Name as GHC (mkInternalName, mkOccName, varName, NameSpace, tcName, dataName, mkExternalName)
 import qualified GHC.Core.TyCon as GHC
 import Agda.Syntax.Common.Pretty (prettyShow)
 import GHC.Core.Multiplicity (Scaled(Scaled))
 import qualified GHC.Builtin.Names as GHC
 import Data.Foldable (for_)
-import GHC.Plugins (UnhelpfulSpanReason(UnhelpfulNoLocationInfo), mkLocalId, mkGlobalId)
+import GHC.Plugins (UnhelpfulSpanReason(UnhelpfulNoLocationInfo), mkLocalId, mkGlobalId, HscEnv (hsc_NC))
 import GHC.Base (Multiplicity(Many))
 import Debug.Trace (traceShow, traceWith, trace)
+import GHC.Types.Name.Cache (updateNameCache, extendOrigNameCache)
 
 type StgAtom = Id
 instance Show StgAtom where
@@ -132,9 +142,10 @@ data StgOptions = StgOptions
 data ToStgEnv = ToStgEnv
   { toStgOptions :: StgOptions
   , toStgVars    :: [StgAtom]
+  , toStgModule  :: GHC.Module
   }
 
-initToStgEnv :: StgOptions -> ToStgEnv
+initToStgEnv :: StgOptions -> GHC.Module -> ToStgEnv
 initToStgEnv opts = ToStgEnv opts []
 
 addBinding :: StgAtom -> ToStgEnv -> ToStgEnv
@@ -164,21 +175,56 @@ initToStgState = do
     , toStgUniqSupply = us
     }
 
-type ToStgM a = StateT ToStgState (ReaderT ToStgEnv TCM) a
+type ToStgM a = StateT ToStgState (ReaderT ToStgEnv (GHC.GhcT TCM)) a
 
-runToStgM :: StgOptions -> ToStgM a -> TCM a
-runToStgM opts x = do
-  let e = initToStgEnv opts
+instance MonadThrow m => MonadThrow (TCMT m) where
+  throwM x = lift (throwM x)
+
+instance MonadCatch m => MonadCatch (TCMT m) where
+  catch (TCM m) h = TCM $ \x y ->
+    catch (m x y) ((\(TCM m') -> m' x y) . h)
+
+instance MonadMask m => MonadMask (TCMT m) where
+  mask f = TCM $ \x y -> 
+    mask (\g -> (\(TCM m) -> m x y) (f (\(TCM m) -> lift (g (m x y)))))
+  uninterruptibleMask f = TCM $ \x y ->
+    uninterruptibleMask (\g -> (\(TCM m) -> m x y) (f (\(TCM m) -> lift (g (m x y)))))
+  generalBracket (TCM pre) m fin = TCM $ \x y ->
+    generalBracket (pre x y) (\a b -> case m a b of TCM m' -> m' x y) (\a -> case fin a of TCM m' -> m' x y)
+
+instance MonadTrans GHC.GhcT where
+  lift = GHC.liftGhcT
+
+liftGhc :: GHC.GhcT TCM a -> ToStgM a
+liftGhc = lift . lift
+
+runToStgM :: StgOptions -> GHC.Module -> ToStgM a -> TCM a
+runToStgM opts mod x = do
+  let e = initToStgEnv opts mod
   s <- liftIO initToStgState
-  runReaderT (evalStateT x s) e
+  GHC.runGhcT Nothing (runReaderT (evalStateT x s) e)
 
 freshStgName :: NameSpace -> String -> ToStgM GHC.Name
 freshStgName ns n = do
+  mod <- asks toStgModule
   s <- get
   let (u,us') = takeUniqFromSupply (toStgUniqSupply s) 
   put s { toStgUniqSupply = us' }
-  pure $ mkInternalName u (mkOccName ns n) (UnhelpfulSpan UnhelpfulNoLocationInfo)
 
+  let occ = mkOccName ns n
+      loc = UnhelpfulSpan UnhelpfulNoLocationInfo
+      uniq = u
+  occ `seq` return ()  -- c.f. seq in newGlobalBinder
+  hsc_env <- liftGhc $ GHC.getSession
+  name <- liftIO $ updateNameCache (hsc_NC hsc_env) mod occ $ \cache -> do
+    let name'  = mkExternalName uniq mod occ loc
+        cache' = extendOrigNameCache cache mod occ name'
+    pure (cache', name')
+
+  -- FIXME: it seems GHC wants global definitions and constructor names to be external
+  pure name
+
+liftedAny :: GHC.Type
 liftedAny = anyTypeOfKind liftedTypeKind
 
 freshStgAtom :: ToStgM StgAtom
@@ -263,6 +309,9 @@ fourBitsToChar i
 class ToStg a b | a -> b where
   toStg :: a -> ToStgM b
 
+liftTCM :: TCM a -> ToStgM a
+liftTCM = lift . lift . lift
+
 -- We first convert all definitions to treeless and calculate their
 -- arity and erasure info, before doing the actual translation to Stg.
 defToStg :: Definition -> ToStgM (Maybe StgTopBinding)
@@ -272,7 +321,7 @@ defToStg def
   | otherwise = do
     let f = defName def
     liftIO $ putStrLn $ "Compiling definition: " <> prettyShow f
-    reportSDoc "toStg" 5 $ "Compiling definition:" <> prettyTCM f
+    -- reportSDoc "toStg" 5 $ "Compiling definition:" <> prettyTCM f
     case theDef def of
       Axiom{} -> do
         -- f' <- newStgDef f 0 []
@@ -309,7 +358,7 @@ defToStg def
         let tname = GHC.Types.Var.varName tatom
         rname <- freshStgName GHC.varName ("$tc" ++ prettyShow (qnameName (defName def)))
         dataCons' <- for (zip [0..] cs) $ \(tag, c) -> do
-          cdef <- getConstInfo c
+          cdef <- liftTCM $ getConstInfo c
           dname <- freshStgName GHC.dataName (prettyShow (qnameName (defName cdef)))
           case theDef cdef of
             Constructor{ conSrcCon = chead, conArity = arity } -> do

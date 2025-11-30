@@ -1,4 +1,3 @@
-agda2scheme: An Agda backend for Chez Scheme
-============================================
+# agda2stg: An Agda backend for GHC STG
 
-This is a work in progress on compiling Agda to Chez Scheme.
+This is a work in progress on compiling Agda to GHC's STG intermediate representation.

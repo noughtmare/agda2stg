@@ -1,0 +1,14 @@
+Rec {
+plus_a2d06 :: Any
+[GblId] =
+    {} \r [x_a2d07 x_a2d08]
+        case x_a2d07 of x_a2d0a {
+          zero_a2d04 -> x_a2d08;
+          suc_a2d05 x_a2d0b ->
+              let {
+                x_a2d0c :: Any
+                [LclId] =
+                    {x_a2d0b, x_a2d08} \u [] plus_a2d06 x_a2d0b x_a2d08;
+              } in  suc_a2d05 x_a2d0c;
+        };
+end Rec }

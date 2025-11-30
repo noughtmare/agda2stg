@@ -1,0 +1,220 @@
+id_a2eiy :: Any
+[GblId] =
+    {} \r [x_a2eiz] x_a2eiz;not_a2eiE :: Any
+[GblId] =
+    {} \r [x_a2eiF]
+        case x_a2eiF of x_a2eiG {
+          true_a2eiC -> false_a2eiD;
+          false_a2eiD -> true_a2eiC;
+        };ite_a2eiH :: Any
+[GblId] =
+    {} \r [x_a2eiI x_a2eiJ x_a2eiK x_a2eiL]
+        case x_a2eiJ of x_a2eiM {
+          true_a2eiC -> x_a2eiK;
+          false_a2eiD -> x_a2eiL;
+        };Rec {
+loop_a2eiN :: Any
+[GblId] =
+    {} \u [] loop_a2eiN;
+end Rec }test1_a2eiO :: Any
+[GblId] =
+    {} \u [] ite_a2eiH () false_a2eiD loop_a2eiN true_a2eiC;one_a2eiT :: Any
+[GblId] =
+    {} \u [] suc_a2eiS zero_a2eiR;two_a2eiU :: Any
+[GblId] =
+    {} \u [] suc_a2eiS one_a2eiT;three_a2eiV :: Any
+[GblId] =
+    {} \u [] suc_a2eiS two_a2eiU;pred_a2eiW :: Any
+[GblId] =
+    {} \r [x_a2eiX]
+        case x_a2eiX of x_a2eiY {
+          zero_a2eiR -> x_a2eiX;
+          suc_a2eiS x_a2eiZ -> x_a2eiZ;
+        };Rec {
+_+__a2ej0 :: Any
+[GblId] =
+    {} \r [x_a2ej1 x_a2ej2]
+        case x_a2ej1 of x_a2ej3 {
+          zero_a2eiR -> x_a2ej2;
+          suc_a2eiS x_a2ej4 ->
+              let {
+                x_a2ej5 :: Any
+                [LclId] =
+                    {x_a2ej4, x_a2ej2} \u [] _+__a2ej0 x_a2ej4 x_a2ej2;
+              } in  suc_a2eiS x_a2ej5;
+        };
+end Rec }Rec {
+twice_a2ej6 :: Any
+[GblId] =
+    {} \r [x_a2ej7]
+        case x_a2ej7 of x_a2ej8 {
+          zero_a2eiR -> x_a2ej7;
+          suc_a2eiS x_a2ej9 ->
+              let {
+                x_a2eja :: Any
+                [LclId] =
+                    {x_a2ej9} \u []
+                        let {
+                          x_a2ejb :: Any
+                          [LclId] =
+                              {x_a2ej9} \u [] twice_a2ej6 x_a2ej9;
+                        } in  suc_a2eiS x_a2ejb;
+              } in  suc_a2eiS x_a2eja;
+        };
+end Rec }Rec {
+pow2_a2ejc :: Any
+[GblId] =
+    {} \r [x_a2ejd]
+        case x_a2ejd of x_a2eje {
+          zero_a2eiR -> suc_a2eiS x_a2ejd;
+          suc_a2eiS x_a2ejf ->
+              let {
+                x_a2ejg :: Any
+                [LclId] =
+                    {x_a2ejf} \u [] pow2_a2ejc x_a2ejf;
+              } in  twice_a2ej6 x_a2ejg;
+        };
+end Rec }Rec {
+consume_a2ejh :: Any
+[GblId] =
+    {} \r [x_a2eji]
+        case x_a2eji of x_a2ejj {
+          zero_a2eiR -> x_a2eji;
+          suc_a2eiS x_a2ejk -> consume_a2ejh x_a2ejk;
+        };
+end Rec }test2_a2ejl :: Any
+[GblId] =
+    {} \u []
+        let {
+          x_a2ejm :: Any
+          [LclId] =
+              {} \u []
+                  let {
+                    x_a2ejn :: Any
+                    [LclId] =
+                        {} \u []
+                            let {
+                              x_a2ejo :: Any
+                              [LclId] =
+                                  {} \u []
+                                      let {
+                                        x_a2ejp :: Any
+                                        [LclId] =
+                                            {} \u [] twice_a2ej6 three_a2eiV;
+                                      } in  twice_a2ej6 x_a2ejp;
+                            } in  twice_a2ej6 x_a2ejo;
+                  } in  pow2_a2ejc x_a2ejn;
+        } in  consume_a2ejh x_a2ejm;head_a2eju :: Any
+[GblId] =
+    {} \r [x_a2ejv x_a2ejw x_a2ejx]
+        case x_a2ejx of x_a2ejy {
+        con_a2ejt x_a2ejz x_a2ejA x_a2ejB -> x_a2ejA;
+        };tail_a2ejC :: Any
+[GblId] =
+    {} \r [x_a2ejD x_a2ejE x_a2ejF]
+        case x_a2ejF of x_a2ejG {
+        con_a2ejt x_a2ejH x_a2ejI x_a2ejJ -> x_a2ejJ;
+        };Rec {
+map_a2ejK :: Any
+[GblId] =
+    {} \r [x_a2ejL x_a2ejM x_a2ejN x_a2ejO x_a2ejP]
+        case x_a2ejP of x_a2ejR {
+          nil_a2ejs -> x_a2ejP;
+          con_a2ejt x_a2ejS x_a2ejT x_a2ejU ->
+              let {
+                x_a2ejV :: Any
+                [LclId] =
+                    {x_a2ejO} \u [] x_a2ejO; } in
+              let {
+                x_a2ejW :: Any
+                [LclId] =
+                    {x_a2ejO, x_a2ejU} \u [] map_a2ejK () () () x_a2ejO x_a2ejU;
+              } in  con_a2ejt () x_a2ejV x_a2ejW;
+        };
+end Rec }test3_a2ejX :: Any
+[GblId] =
+    {} \u []
+        let {
+          x_a2ejY :: Any
+          [LclId] =
+              {} \u []
+                  let {
+                    x_a2ejZ :: Any
+                    [LclId] =
+                        {} \u []
+                            let {
+                              x_a2ek0 :: Any
+                              [LclId] =
+                                  {} \u []
+                                      let {
+                                        x_a2ek1 :: Any
+                                        [LclId] =
+                                            {} \u []
+                                                let {
+                                                  x_a2ek2 :: Any
+                                                  [LclId] =
+                                                      {} \u [] suc_a2eiS zero_a2eiR; } in
+                                                let {
+                                                  x_a2ek3 :: Any
+                                                  [LclId] =
+                                                      {} \u []
+                                                          let {
+                                                            x_a2ek4 :: Any
+                                                            [LclId] =
+                                                                {} \u []
+                                                                    let {
+                                                                      x_a2ek5 :: Any
+                                                                      [LclId] =
+                                                                          {} \u []
+                                                                              suc_a2eiS zero_a2eiR;
+                                                                    } in  suc_a2eiS x_a2ek5;
+                                                          } in  con_a2ejt () x_a2ek4 nil_a2ejs;
+                                                } in  con_a2ejt () x_a2ek2 x_a2ek3;
+                                      } in  con_a2ejt () zero_a2eiR x_a2ek1;
+                            } in  map_a2ejK () () () suc_a2eiS x_a2ek0;
+                  } in  tail_a2ejC () () x_a2ejZ;
+        } in  head_a2eju () () x_a2ejY;123'#|H\x65llo_a2ek6 :: Any
+[GblId] =
+    {} \u [] zero_a2eiR;test4_a2ek7 :: Any
+[GblId] =
+    {} \u [] 123'#|H\x65llo_a2ek6;fie_a2ek8 :: Any
+[GblId] =
+    {} \r [x_a2ek9] suc_a2eiS x_a2ek9;foe_a2eka :: Any
+[GblId] =
+    {} \r [x_a2ekb]
+        let {
+          x_a2ekc :: Any
+          [LclId] =
+              {x_a2ekb} \u [] fie_a2ek8 x_a2ekb;
+        } in  suc_a2eiS x_a2ekc;fun_a2ekd :: Any
+[GblId] =
+    {} \u []
+        let {
+          x_a2eke :: Any
+          [LclId] =
+              {} \u []
+                  let {
+                    x_a2ekf :: Any
+                    [LclId] =
+                        {} \u []
+                            let {
+                              x_a2ekg :: Any
+                              [LclId] =
+                                  {} \u [] suc_a2eiS zero_a2eiR;
+                            } in  suc_a2eiS x_a2ekg;
+                  } in  fie_a2ek8 x_a2ekf; } in
+        let {
+          x_a2ekh :: Any
+          [LclId] =
+              {} \u []
+                  let {
+                    x_a2eki :: Any
+                    [LclId] =
+                        {} \u []
+                            let {
+                              x_a2ekj :: Any
+                              [LclId] =
+                                  {} \u [] suc_a2eiS zero_a2eiR;
+                            } in  suc_a2eiS x_a2ekj;
+                  } in  foe_a2eka x_a2eki;
+        } in  _+__a2ej0 x_a2eke x_a2ekh;

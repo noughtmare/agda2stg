@@ -44,7 +44,7 @@ import Control.DeepSeq ( NFData )
 
 import Control.Monad.Except
 import Control.Monad.Reader
-import Control.Monad.State
+import Control.Monad.State.Strict
 
 import Data.Char
 import Data.Map (Map)
@@ -236,7 +236,7 @@ getEvaluationStrategy :: ToStgM EvaluationStrategy
 getEvaluationStrategy = reader $ stgEvaluation . toStgOptions
 
 getVar :: Int -> ToStgM StgAtom
-getVar i | traceShow ("getVar", i) False = undefined
+--getVar i | traceShow ("getVar", i) False = undefined
 getVar i = reader $ (!! i) . toStgVars
 
 withFreshVar :: (StgAtom -> ToStgM a) -> ToStgM a
@@ -387,14 +387,14 @@ defToStg def
 
 -- TODO: use bs
 topLevelStg :: [Bool] -> QName -> TTerm -> ToStgM StgTopBinding
-topLevelStg _ f x | trace ("topLevelStg: " ++ prettyShow f ++ " ||| " ++ prettyShow x) False = undefined
+--ntopLevelStg _ f x | trace ("topLevelStg: " ++ prettyShow f ++ " ||| " ++ prettyShow x) False = undefined
 topLevelStg _bs f body = do
   stgF <- makeStgName f
   setStgDef f (ToStgDef stgF (length _bs) _bs)
   (StgTopLifted . StgNonRec stgF) <$> rhsStg (convertGuards body)
 
 rhsStg :: TTerm -> ToStgM StgRhs
-rhsStg x | trace ("rhsStg: " ++ prettyShow x) False = undefined
+-- rhsStg x | trace ("rhsStg: " ++ prettyShow x) False = undefined
 rhsStg body = do
   let (n, body') = lambdaView body
   -- unless (length bs >= n) __IMPOSSIBLE__
@@ -404,7 +404,7 @@ rhsStg body = do
     pure (StgRhsClosure noExtFieldSilent dontCareCCS uf xs body'' liftedAny)
 
 appStg :: TTerm -> [TTerm] -> ToStgM StgExpr
-appStg x xs | trace ("appStg: " ++ prettyShow x ++ " ||| " ++ prettyShow xs) False = undefined
+-- appStg x xs | trace ("appStg: " ++ prettyShow x ++ " ||| " ++ prettyShow xs) False = undefined
 appStg (TCoerce w) args = appStg w args 
 appStg (TApp w args1) args2 = appStg w (args1 ++ args2) 
 appStg f args = bindsStg args $ \args' -> 
@@ -453,12 +453,12 @@ appStg f args = bindsStg args $ \args' ->
     TError e -> do liftIO (putStrLn "TError"); pure $ stgError $ T.pack $ show e
 
 caseToAltType :: CaseType -> ToStgM AltType
-caseToAltType (CTData name) | trace ("caseToAltType: " ++ prettyShow name) False = undefined
+-- caseToAltType (CTData name) | trace ("caseToAltType: " ++ prettyShow name) False = undefined
 caseToAltType (CTData name) = AlgAlt <$> lookupStgTyCon name
 caseToAltType _ = error "TODO: support non-algebraic matching"
 
 altStg :: TAlt -> ToStgM StgAlt
-altStg (TACon name arity body) | trace ("altStg:" ++ prettyShow name ++ " ||| " ++ show arity ++ " ||| " ++ prettyShow body) False = undefined
+-- altStg (TACon name arity body) | trace ("altStg:" ++ prettyShow name ++ " ||| " ++ show arity ++ " ||| " ++ prettyShow body) False = undefined
 altStg (TACon name arity body) = do 
   ToStgCon con _ _ _ <- lookupStgCon name
   withFreshVars arity $ \vars ->
@@ -467,7 +467,7 @@ altStg _ = __IMPOSSIBLE__ -- we have already converted guards and eliminated lit
 
 -- TODO OPT: collect let bindings, avoid nested lets
 bindStg :: TTerm -> (StgAtom -> ToStgM StgExpr) -> ToStgM StgExpr
-bindStg x _ | trace ("bindStg: " ++ prettyShow x) False = undefined
+-- bindStg x _ | trace ("bindStg: " ++ prettyShow x) False = undefined
 bindStg (TDef x) k = do
   ToStgDef x' _ _ <- lookupStgDef x
   k x'
@@ -489,7 +489,7 @@ bindsStg [] k = k []
 bindsStg (v:vs) k = bindStg v (\v' -> bindsStg vs (\vs' -> k (v' : vs')))
 
 litStg :: Literal -> ToStgM StgExpr
-litStg x | trace ("litStg: " ++ prettyShow x) False = undefined
+-- litStg x | trace ("litStg: " ++ prettyShow x) False = undefined
 litStg lit = case lit of
     LitNat    x -> return $ StgLit (GHCLit.LitNumber GHCLit.LitNumBigNat x)
     LitWord64 x -> return $ StgLit (GHCLit.LitNumber GHCLit.LitNumWord64 (fromIntegral x))

@@ -29,6 +29,8 @@ import Control.Monad.Writer
 
 import Data.Function
 import qualified Data.List.NonEmpty as NE
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe
@@ -36,12 +38,13 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 
+import qualified GHC.Data.Stream as Stream
 import GHC.Generics ( Generic )
 import GHC.Stg.Syntax (pprStgTopBinding, StgPprOpts (StgPprOpts))
 import GHC.Driver.Ppr (showSDocUnsafe)
 import GHC.Utils.Logger (initLogger, HasLogger (getLogger))
-import GHC (mkModule, mkModuleName, runGhc, ModLocation (..), moduleNameSlashes, moduleName, setUnitDynFlags, getSessionDynFlags, setSessionDynFlags, GhcMonad (getSession))
-import GHC.Unit (mainUnit, GenericUnitInfo (unitId))
+import GHC (mkModule, mkModuleName, runGhc, ModLocation (..), moduleNameSlashes, moduleName, setUnitDynFlags, getSessionDynFlags, setSessionDynFlags, GhcMonad (getSession), setTargets, DynFlags (homeUnitId_), setProgramDynFlags)
+import GHC.Unit (mainUnit, GenericUnitInfo (unitId, unitIncludeDirs), lookupUnitId, rtsUnitId, mainUnitId, initUnits)
 import GHC.Driver.DynFlags (defaultDynFlags, initDynFlags, targetProfile)
 import GHC.Driver.Main (initHscEnv, doCodeGen)
 import GHC.Driver.Env (HscEnv(hsc_dflags, hsc_llvm_config, hsc_tmpfs), hsc_units)
@@ -57,7 +60,12 @@ import GHC.Driver.Config.Finder (initFinderOpts)
 import System.OsPath
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
 import Data.Unique (newUnique)
-import GHC.Cmm.UniqueRenamer (initDUniqSupply)
+import GHC.Cmm.UniqueRenamer (initDUniqSupply, runUniqueDSM, runUDSMT)
+import GHC.Driver.Session (updatePlatformConstants)
+import GHC.Prelude (pprTrace, pprTraceM)
+import GHC.Utils.Outputable (ppr)
+import GHC.Driver.Pipeline (hscPostBackendPipeline)
+import GHC.Driver.Pipeline.Execute (compileStub)
 
 main :: IO ()
 main = runAgda [backend]
@@ -100,13 +108,21 @@ stgPostModule opts _ isMain modName defs = do
 
   let defToText _ = "" -- encodeOne printer . fromRich
       fileName  = prettyShow (NE.last $ moduleNameParts modName) ++ ".stg"
+      asmFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".s"
       this_mod = mkModule mainUnit (mkModuleName (prettyShow modName))
 
   modText <- runToStgM opts this_mod $ do
     -- init
+
+    -- !hsc_env <- liftGhc getSession
+    -- case lookupUnitId (hsc_units hsc_env) rtsUnitId of
+    --   Nothing -> liftIO $ putStrLn "nothing"
+    --   Just info -> liftIO $ putStrLn $ lookupPlatformConstants (fmap ST.unpack (unitIncludeDirs info))
+
     dflags <- liftGhc getSessionDynFlags
     liftGhc $ setSessionDynFlags dflags
     logger <- liftGhc getLogger
+    dflags <- liftGhc getSessionDynFlags
 
     -- Convert Agda definitions to STG
     -- TODO? stgPreamble
@@ -128,6 +144,9 @@ stgPostModule opts _ isMain modName defs = do
     let data_tycons = [] -- TODO
 
     !hsc_env <- liftGhc getSession
+    -- case lookupUnitId (hsc_units hsc_env) rtsUnitId of
+    --   Nothing -> liftIO $ putStrLn "nothing"
+    --   Just u -> liftIO $ putStrLn $ show (unitIncludeDirs u)
     
     !cmms <- liftIO $ doCodeGen hsc_env this_mod emptyInfoTableProvMap [] mempty stg_binds
     !rawccms0 <- liftIO $ cmmToRawCmm logger (targetProfile dflags) cmms
@@ -149,10 +168,18 @@ stgPostModule opts _ isMain modName defs = do
       foreign_stubs _ = NoStubs
       foreign_files = []
       duniqsupply = initDUniqSupply 'a' 0
-    
-    -- Output ASM (?)
-    (!output_filename, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos)
-        <- liftIO $ codeOutput logger (hsc_tmpfs hsc_env) (hsc_llvm_config hsc_env) dflags (hsc_units hsc_env) this_mod fileName mod_location foreign_stubs foreign_files dependencies duniqsupply rawccms0
+
+    -- Output ASM
+    -- TODO: better filename
+    (!o_file, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos)
+        <- liftIO $ codeOutput logger (hsc_tmpfs hsc_env) (hsc_llvm_config hsc_env) dflags (hsc_units hsc_env) this_mod asmFileName mod_location foreign_stubs foreign_files dependencies duniqsupply rawccms0
+
+    stub_o <- mapM (compileStub hsc_env) mStub
+    foreign_os <-
+      mapM (uncurry (compileForeign hsc_env)) foreign_files
+    let fos = maybe [] return stub_o ++ foreign_os
+
+    final_fp <- hscPostBackendPipeline pipe_env hsc_env (ms_hsc_src mod_sum) (backend (hsc_dflags hsc_env)) (Just location) o_file
 
     return $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
 
@@ -184,7 +211,10 @@ stgPostModule opts _ isMain modName defs = do
 --         return (mlinkable { homeMod_object = Just linkable })
 --   return (miface, final_linkable)
 
-
+-- ghc -v3 will show all information that GHC passes to clang
+-- make sure that my invocations match the normal compilation of e.g. HelloWorld.hs
+-- ghc -keep-tmp-files can show the real main.c
+-- need to link against ffi and rts
 
   liftIO $ putStrLn "Writing output..."
 

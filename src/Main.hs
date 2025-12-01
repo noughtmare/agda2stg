@@ -46,8 +46,10 @@ import GHC.Utils.Logger (initLogger, HasLogger (getLogger))
 import GHC (mkModule, mkModuleName, runGhc, ModLocation (..), moduleNameSlashes, moduleName, setUnitDynFlags, getSessionDynFlags, setSessionDynFlags, GhcMonad (getSession), setTargets, DynFlags (homeUnitId_), setProgramDynFlags)
 import GHC.Unit (mainUnit, GenericUnitInfo (unitId, unitIncludeDirs), lookupUnitId, rtsUnitId, mainUnitId, initUnits)
 import GHC.Driver.DynFlags (defaultDynFlags, initDynFlags, targetProfile)
+import qualified GHC.Driver.DynFlags as GHC
+import qualified GHC.SysTools
 import GHC.Driver.Main (initHscEnv, doCodeGen)
-import GHC.Driver.Env (HscEnv(hsc_dflags, hsc_llvm_config, hsc_tmpfs), hsc_units)
+import GHC.Driver.Env (HscEnv(hsc_dflags, hsc_llvm_config, hsc_tmpfs, hsc_logger, hsc_unit_env), hsc_units)
 import GHC.Stg.Pipeline (stg2stg)
 import GHC.Driver.Config.Stg.Pipeline (initStgPipelineOpts)
 import GHC.Types.IPE (emptyInfoTableProvMap)
@@ -58,14 +60,19 @@ import GHC.Unit.Finder
 import GHC.Driver.Config.Finder (initFinderOpts)
 
 import System.OsPath
+import Data.Time.Clock
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
 import Data.Unique (newUnique)
 import GHC.Cmm.UniqueRenamer (initDUniqSupply, runUniqueDSM, runUDSMT)
 import GHC.Driver.Session (updatePlatformConstants)
 import GHC.Prelude (pprTrace, pprTraceM)
 import GHC.Utils.Outputable (ppr)
-import GHC.Driver.Pipeline (hscPostBackendPipeline)
+import GHC.Driver.Pipeline (hscPostBackendPipeline, compileForeign)
 import GHC.Driver.Pipeline.Execute (compileStub)
+import GHC.SysTools (runAs)
+import qualified GHC.Driver.Session as GHC
+import GHC.Plugins (withAtomicRename)
+import GHC.Linker.Static (linkBinary)
 
 main :: IO ()
 main = runAgda [backend]
@@ -102,16 +109,75 @@ stgFlags =
 stgPreCompile :: StgOptions -> TCM StgOptions
 stgPreCompile opts = return opts
 
+-- Run either 'clang' or 'gcc' phases
+runGenericAsPhase :: [GHC.Option] -> Bool -> FilePath -> HscEnv -> Maybe ModLocation -> FilePath -> IO FilePath
+runGenericAsPhase extra_opts with_cpp output_fn hsc_env location input_fn = do
+        let dflags     = hsc_dflags   hsc_env
+        let logger     = hsc_logger   hsc_env
+        let unit_env   = hsc_unit_env hsc_env
+
+        let cmdline_include_paths = GHC.includePaths dflags
+        let pic_c_flags = GHC.picCCOpts dflags
+
+        -- -- we create directories for the object file, because it
+        -- -- might be a hierarchical module.
+        -- createDirectoryIfMissing True (takeDirectory output_fn)
+
+        -- add package include paths
+        -- all_includes <- if not with_cpp
+        --   then pure []
+        --   else do
+        --     pkg_include_dirs <- mayThrowUnitErr (collectIncludeDirs <$> preloadUnitsInfo unit_env)
+        --     let global_includes = [ GHC.SysTools.Option ("-I" ++ p)
+        --                           | p <- includePathsGlobal cmdline_include_paths ++ pkg_include_dirs]
+        --     let local_includes = [ GHC.SysTools.Option ("-iquote" ++ p)
+        --                          | p <- includePathsQuote cmdline_include_paths ++ includePathsQuoteImplicit cmdline_include_paths]
+        --     pure (local_includes ++ global_includes)
+        let all_includes = []
+        let runAssembler inputFilename outputFilename
+              = withAtomicRename outputFilename $ \temp_outputFilename ->
+                    runAs
+                       logger dflags
+                       (all_includes
+                       -- See Note [-fPIC for assembler]
+                       ++ map GHC.SysTools.Option pic_c_flags
+                       -- See Note [Produce big objects on Windows]
+                       -- ++ [ GHC.SysTools.Option "-Wa,-mbig-obj"
+                       --    | platformOS (targetPlatform dflags) == OSMinGW32
+                       --    , not $ target32Bit (targetPlatform dflags)
+                       --    ]
+
+                       -- See Note [-Wa,--no-type-check on wasm32]
+                       -- ++ [ GHC.SysTools.Option "-Wa,--no-type-check"
+                       --    | platformArch (targetPlatform dflags) == ArchWasm32]
+
+                       ++ [ GHC.SysTools.Option "-x"
+                          , if with_cpp
+                              then GHC.SysTools.Option "assembler-with-cpp"
+                              else GHC.SysTools.Option "assembler"
+                          , GHC.SysTools.Option "-c"
+                          , GHC.SysTools.FileOption "" inputFilename
+                          , GHC.SysTools.Option "-o"
+                          , GHC.SysTools.FileOption "" temp_outputFilename
+                          ] ++ extra_opts)
+
+        -- debugTraceMsg logger 4 (text "Running the assembler")
+        runAssembler input_fn output_fn
+
+        return output_fn
+
 stgPostModule :: StgOptions -> () -> IsMain -> TopLevelModuleName -> [(IsMain, Definition)] -> TCM ()
-stgPostModule opts _ isMain modName defs = do
+stgPostModule opts _ isMain modName defs | NE.last (moduleNameParts modName) /= "Primitive" = do
+
   liftIO $ putStrLn "postModule"
 
   let defToText _ = "" -- encodeOne printer . fromRich
       fileName  = prettyShow (NE.last $ moduleNameParts modName) ++ ".stg"
       asmFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".s"
+      objectFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".s"
       this_mod = mkModule mainUnit (mkModuleName (prettyShow modName))
 
-  modText <- runToStgM opts this_mod $ do
+  runToStgM opts this_mod $ do
     -- init
 
     -- !hsc_env <- liftGhc getSession
@@ -171,19 +237,27 @@ stgPostModule opts _ isMain modName defs = do
 
     -- Output ASM
     -- TODO: better filename
-    (!o_file, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos)
+    (!asm_file, (_stub_h_exists, stub_c_exists), foreign_fps, cmm_cg_infos)
         <- liftIO $ codeOutput logger (hsc_tmpfs hsc_env) (hsc_llvm_config hsc_env) dflags (hsc_units hsc_env) this_mod asmFileName mod_location foreign_stubs foreign_files dependencies duniqsupply rawccms0
 
-    stub_o <- mapM (compileStub hsc_env) mStub
-    foreign_os <-
-      mapM (uncurry (compileForeign hsc_env)) foreign_files
-    let fos = maybe [] return stub_o ++ foreign_os
+    -- stub_o <- liftIO $ mapM (compileStub hsc_env) mStub
+    -- foreign_os <-
+    -- fos <-
+    --   liftIO $ mapM (uncurry (compileForeign hsc_env)) foreign_files
+    -- let fos = maybe [] return stub_o ++ foreign_os
 
-    final_fp <- hscPostBackendPipeline pipe_env hsc_env (ms_hsc_src mod_sum) (backend (hsc_dflags hsc_env)) (Just location) o_file
+    object_file <- liftIO $ runGenericAsPhase [] False objectFileName hsc_env Nothing asm_file
 
-    return $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
+    -- -- don't need this if only compiling one file:
+    -- unlinked_time <- liftIO getCurrentTime
+    -- final_unlinked <- DotO <$> use (T_MergeForeign pipe_env hsc_env o_fp fos)
+    -- let !linkable = LM unlinked_time (ms_mod mod_sum) [final_unlinked]
+    -- Add the object linkable to the potential bytecode linkable which was generated in HscBackend.
+    -- return (mlinkable { homeMod_object = Just linkable })
 
+    liftIO $ linkBinary logger (hsc_tmpfs hsc_env) dflags (hsc_unit_env hsc_env) [object_file] []
 
+    return () -- $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
 
 -- THE PIPELINE
 
@@ -216,13 +290,15 @@ stgPostModule opts _ isMain modName defs = do
 -- ghc -keep-tmp-files can show the real main.c
 -- need to link against ffi and rts
 
-  liftIO $ putStrLn "Writing output..."
+  -- liftIO $ putStrLn "Writing output..."
 
-  liftIO $ T.writeFile fileName $! modText
+  -- liftIO $ T.writeFile fileName $! modText
 
-  where
+  -- where
     -- printer :: SExprPrinter Text (SExpr Text)
     -- printer = basicPrint id
+
+stgPostModule _ _ _ _ _ = pure ()
 
 evaluationFlag :: EvaluationStrategy -> Flag StgOptions
 evaluationFlag s o = return $ o { stgEvaluation = s }

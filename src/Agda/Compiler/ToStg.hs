@@ -206,6 +206,18 @@ runToStgM opts mod x = do
 
 freshStgName :: NameSpace -> String -> ToStgM GHC.Name
 freshStgName ns n = do
+  s <- get
+  let (u,us') = takeUniqFromSupply (toStgUniqSupply s) 
+  put s { toStgUniqSupply = us' }
+
+  let !occ = mkOccName ns n
+      loc = UnhelpfulSpan UnhelpfulNoLocationInfo
+
+  -- FIXME: it seems GHC wants global definitions and constructor names to be external
+  pure (mkInternalName u occ loc)
+
+freshStgExternalName :: NameSpace -> String -> ToStgM GHC.Name
+freshStgExternalName ns n = do
   mod <- asks toStgModule
   s <- get
   let (u,us') = takeUniqFromSupply (toStgUniqSupply s) 
@@ -297,7 +309,7 @@ setStgTyCon n tycon = do
 -- Precondition: the given name is not already in toStgDefs.
 makeStgName :: QName -> ToStgM StgAtom
 makeStgName n = do
-  name <- freshStgName GHC.varName (prettyShow (qnameName n)) 
+  name <- freshStgExternalName GHC.varName (prettyShow (qnameName n)) 
   pure $ mkGlobalId VanillaId name liftedAny vanillaIdInfo
 
 fourBitsToChar :: Int -> Char
@@ -320,7 +332,7 @@ defToStg def
     not (usableModality $ getModality def) = return Nothing
   | otherwise = do
     let f = defName def
-    liftIO $ putStrLn $ "Compiling definition: " <> prettyShow f
+    -- liftIO $ putStrLn $ "Compiling definition: " <> prettyShow f
     -- reportSDoc "toStg" 5 $ "Compiling definition:" <> prettyTCM f
     case theDef def of
       Axiom{} -> do
@@ -330,7 +342,7 @@ defToStg def
       GeneralizableVar{} -> return Nothing
       d@Function{} | d ^. funInline -> return Nothing
       Function{} -> do
-        liftIO $ putStrLn "Compiling function"
+        -- liftIO $ putStrLn "Compiling function"
         strat <- getEvaluationStrategy
         maybeCompiled <- liftTCM $ toTreeless strat f
         case maybeCompiled of
@@ -353,13 +365,13 @@ defToStg def
         return Nothing -- TODO!
       PrimitiveSort{} -> return Nothing
       Datatype{ dataCons = cs } -> do
-        liftIO $ putStrLn "Datatype"
+        -- liftIO $ putStrLn "Datatype"
         tatom <- freshStgAtom -- GHC.tcName (prettyShow (qnameName (defName def)))
         let tname = GHC.Types.Var.varName tatom
-        rname <- freshStgName GHC.varName ("$tc" ++ prettyShow (qnameName (defName def)))
+        rname <- freshStgExternalName GHC.varName ("$tc" ++ prettyShow (qnameName (defName def)))
         dataCons' <- for (zip [0..] cs) $ \(tag, c) -> do
           cdef <- liftTCM $ getConstInfo c
-          dname <- freshStgName GHC.dataName (prettyShow (qnameName (defName cdef)))
+          dname <- freshStgExternalName GHC.dataName (prettyShow (qnameName (defName cdef)))
           case theDef cdef of
             Constructor{ conSrcCon = chead, conArity = arity } -> do
               let dc tyCon = mkDataCon dname False rname [] [] [] [] mempty [] [] [] (replicate arity (Scaled oneDataConTy liftedAny)) (GHC.mkTyConTy tyCon) NoPromInfo tyCon tag [] (mkDataConWorkId dname (dc tyCon)) NoDataConRep
@@ -450,12 +462,12 @@ appStg f args = bindsStg args $ \args' ->
       unless (null args) __IMPOSSIBLE__
       pure $ StgApp unitDataConId []
     TErased -> pure $ StgApp unitDataConId []
-    TError e -> do liftIO (putStrLn "TError"); pure $ stgError $ T.pack $ show e
+    TError e -> pure $ stgError $ T.pack $ show e
 
 caseToAltType :: CaseType -> ToStgM AltType
 -- caseToAltType (CTData name) | trace ("caseToAltType: " ++ prettyShow name) False = undefined
 caseToAltType (CTData name) = AlgAlt <$> lookupStgTyCon name
-caseToAltType _ = error "TODO: support non-algebraic matching"
+caseToAltType _ = __IMPOSSIBLE__ -- error "TODO: support non-algebraic matching"
 
 altStg :: TAlt -> ToStgM StgAlt
 -- altStg (TACon name arity body) | trace ("altStg:" ++ prettyShow name ++ " ||| " ++ show arity ++ " ||| " ++ prettyShow body) False = undefined

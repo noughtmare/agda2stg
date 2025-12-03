@@ -2,6 +2,8 @@ module Main where
 
 import Prelude hiding ( null , empty )
 
+import Data.Foldable (toList)
+
 import Agda.Compiler.Backend
 import Agda.Compiler.Common
 
@@ -38,6 +40,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 
+import qualified GHC.Data.EnumSet
 import qualified GHC.Data.Stream as Stream
 import GHC.Generics ( Generic )
 import GHC.Stg.Syntax (pprStgTopBinding, StgPprOpts (StgPprOpts))
@@ -141,13 +144,13 @@ runGenericAsPhase extra_opts with_cpp output_fn hsc_env location input_fn = do
                        (all_includes
                        -- See Note [-fPIC for assembler]
                        ++ map GHC.SysTools.Option pic_c_flags
-                       -- See Note [Produce big objects on Windows]
+                      -- -- See Note [Produce big objects on Windows]
                        -- ++ [ GHC.SysTools.Option "-Wa,-mbig-obj"
                        --    | platformOS (targetPlatform dflags) == OSMinGW32
                        --    , not $ target32Bit (targetPlatform dflags)
                        --    ]
 
-                       -- See Note [-Wa,--no-type-check on wasm32]
+                       -- -- See Note [-Wa,--no-type-check on wasm32]
                        -- ++ [ GHC.SysTools.Option "-Wa,--no-type-check"
                        --    | platformArch (targetPlatform dflags) == ArchWasm32]
 
@@ -174,7 +177,7 @@ stgPostModule opts _ isMain modName defs | NE.last (moduleNameParts modName) /= 
   let defToText _ = "" -- encodeOne printer . fromRich
       fileName  = prettyShow (NE.last $ moduleNameParts modName) ++ ".stg"
       asmFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".s"
-      objectFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".s"
+      objectFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".o"
       this_mod = mkModule mainUnit (mkModuleName (prettyShow modName))
 
   runToStgM opts this_mod $ do
@@ -186,16 +189,18 @@ stgPostModule opts _ isMain modName defs | NE.last (moduleNameParts modName) /= 
     --   Just info -> liftIO $ putStrLn $ lookupPlatformConstants (fmap ST.unpack (unitIncludeDirs info))
 
     dflags <- liftGhc getSessionDynFlags
-    liftGhc $ setSessionDynFlags dflags
+    liftGhc $ setSessionDynFlags dflags { GHC.verbosity = 3 }
     logger <- liftGhc getLogger
     dflags <- liftGhc getSessionDynFlags
 
     -- Convert Agda definitions to STG
     -- TODO? stgPreamble
-    stg_binds <- catMaybes <$> traverse (\x -> liftIO (putStrLn "another def") >> defToStg x) (map snd defs)
+    stg_binds <- catMaybes <$> traverse (\x -> {- liftIO (putStrLn "another def") >> -} defToStg x) (map snd defs)
     liftIO $ putStrLn "Done generating STG"
 
     -- Rest of the GHC pipeline
+
+    liftIO $ print $ GHC.Data.EnumSet.toList (GHC.generalFlags dflags)
 
     let
       ic_inscope = [] -- in-scope variables from GHCi 

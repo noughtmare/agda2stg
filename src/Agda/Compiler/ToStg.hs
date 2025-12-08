@@ -3,6 +3,7 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Agda.Compiler.ToStg where
 
+import qualified Data.List as List
 import Prelude hiding (null, empty, mod)
 
 
@@ -67,7 +68,7 @@ import Data.Text.Encoding (encodeUtf8)
 import GHC.Stg.Lift.Monad (mkStgBinding)
 import Control.Monad (replicateM)
 import GHC.Types.Id.Info (IdDetails(DataConWrapId, VanillaId), vanillaIdInfo)
-import GHC.Core.DataCon (dataConWorkId, DataCon, dataConTyCon, mkDataCon, DataConRep (NoDataConRep))
+import GHC.Core.DataCon (dataConWorkId, DataCon, dataConTyCon, mkDataCon, DataConRep (NoDataConRep), dataConWrapId)
 import GHC.Core
 import GHC.Types.Basic
 import GHC.Core.TyCon (mkAlgTyCon, mkDataTyConRhs, AlgTyConFlav (VanillaAlgTyCon), PromDataConInfo (NoPromInfo))
@@ -76,16 +77,18 @@ import GHC.Tc.TyCl.Build (newTyConRepName)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Id.Make (mkDataConWorkId)
 import Data.Traversable (for)
-import GHC.Types.Name as GHC (mkInternalName, mkOccName, varName, NameSpace, tcName, dataName, mkExternalName)
+import GHC.Types.Name as GHC (mkInternalName, mkOccName, varName, NameSpace, tcName, dataName, mkExternalName, nameOccName, mkVarOcc)
 import qualified GHC.Core.TyCon as GHC
 import Agda.Syntax.Common.Pretty (prettyShow)
 import GHC.Core.Multiplicity (Scaled(Scaled))
 import qualified GHC.Builtin.Names as GHC
 import Data.Foldable (for_)
-import GHC.Plugins (UnhelpfulSpanReason(UnhelpfulNoLocationInfo), mkLocalId, mkGlobalId, HscEnv (hsc_NC))
+import GHC.Plugins (UnhelpfulSpanReason(UnhelpfulNoLocationInfo), mkLocalId, mkGlobalId, HscEnv (hsc_NC), fsLit, hsc_units, idName, showSDocUnsafe, Outputable (ppr))
 import GHC.Base (Multiplicity(Many))
 import Debug.Trace (traceShow, traceWith, trace)
 import GHC.Types.Name.Cache (updateNameCache, extendOrigNameCache)
+import GHC.Types.TyThing (MonadThings(lookupId))
+import qualified GHC.Unit as GHC
 
 type StgAtom = Id
 instance Show StgAtom where
@@ -338,7 +341,29 @@ defToStg def
       Axiom{} -> do
         -- f' <- newStgDef f 0 []
         -- TODO
-        return Nothing
+
+        when (prettyShow (qnameName (defName def)) == "interact") $ do
+          liftIO $ putStrLn "Found 'interact' axiom!"
+          hsc_env <- liftGhc GHC.getSession
+          -- FIXME: This is not how it should be done!
+          liftIO $ putStrLn $ show $ GHC.ghcInternalUnit
+          let ((preludeMod,_):_) = GHC.lookupModuleInAllUnits (hsc_units hsc_env) (GHC.mkModuleName "GHC.Internal.System.IO")
+          preludeInf <- liftGhc $ GHC.getModuleInfo preludeMod
+          case preludeInf of
+            Nothing -> liftIO $ putStrLn "NOTHING!!!"
+            Just preludeInf -> do
+              let preludeIds = mapMaybe (\case GHC.AnId x -> Just x; _ -> Nothing) (GHC.modInfoTyThings preludeInf)
+              liftIO $ print preludeIds
+              case List.find (\x -> nameOccName (idName x) == mkVarOcc "interact") preludeIds of
+                Nothing -> liftIO $ putStrLn "STILL NOTHING!!!!!!"
+                Just interactTyThing -> do
+                  s <- get
+                  put s { toStgDefs = Map.insert (defName def) (ToStgDef (interactTyThing) 1 [False]) (toStgDefs s) }
+          -- minf_exports preludeInf
+          -- interactId <- liftGhc (lookupId _)
+          -- s <- get
+          pure ()
+        pure Nothing
       GeneralizableVar{} -> return Nothing
       d@Function{} | d ^. funInline -> return Nothing
       Function{} -> do
@@ -393,7 +418,11 @@ defToStg def
       Record{ recConHead = chead, recFields = fs } -> do
         -- TODO: processCon chead (length fs) True
         return Nothing
-      Constructor{} -> return Nothing
+      Constructor{} -> do
+        -- TODO: Figure out what to generate for constructors
+        -- ToStgCon c _ _ _ <- lookupStgCon f
+        -- return (Just (StgTopLifted (StgNonRec (dataConWorkId c) (StgRhsCon dontCareCCS c NoNumber [] [] anyTy))))
+        pure Nothing
       AbstractDefn{} -> __IMPOSSIBLE__
       DataOrRecSig{} -> __IMPOSSIBLE__
 
@@ -438,8 +467,9 @@ appStg f args = bindsStg args $ \args' ->
       ToStgDef name _ _ <- lookupStgDef def
       pure $ StgApp name (map StgVarArg args')
     TCon c -> do
-      ToStgCon name _ _ _ <- lookupStgCon c
-      pure $ StgApp (dataConWorkId name) (map StgVarArg args')
+      ToStgCon con _ _ _ <- lookupStgCon c
+      -- FIXME: StgConApp must be fully saturated, do something else otherwise
+      pure $ StgConApp con NoNumber (map StgVarArg args') []
     TLet rhs body -> do
       bindStg rhs (\x -> local (addBinding x) (appStg body []))
       -- rhs' <- appStg rhs []
@@ -483,9 +513,9 @@ bindStg :: TTerm -> (StgAtom -> ToStgM StgExpr) -> ToStgM StgExpr
 bindStg (TDef x) k = do
   ToStgDef x' _ _ <- lookupStgDef x
   k x'
-bindStg (TCon x) k = do
-  ToStgCon x' _ _ _ <- lookupStgCon x
-  k (dataConWorkId x')
+-- bindStg (TCon x) k = do
+--   ToStgCon x' _ _ _ <- lookupStgCon x
+--   k (dataConWorkId x')
 bindStg TErased k = k unitDataConId
 bindStg (TSort) k = k unitDataConId
 bindStg (TUnit) k = k unitDataConId

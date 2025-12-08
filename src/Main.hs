@@ -46,7 +46,7 @@ import GHC.Generics ( Generic )
 import GHC.Stg.Syntax (pprStgTopBinding, StgPprOpts (StgPprOpts))
 import GHC.Driver.Ppr (showSDocUnsafe)
 import GHC.Utils.Logger (initLogger, HasLogger (getLogger))
-import GHC (mkModule, mkModuleName, runGhc, ModLocation (..), moduleNameSlashes, moduleName, setUnitDynFlags, getSessionDynFlags, setSessionDynFlags, GhcMonad (getSession), setTargets, DynFlags (homeUnitId_), setProgramDynFlags)
+import GHC (mkModule, mkModuleName, runGhc, ModLocation (..), moduleNameSlashes, moduleName, setUnitDynFlags, getSessionDynFlags, setSessionDynFlags, GhcMonad (getSession), setTargets, DynFlags (homeUnitId_), setProgramDynFlags, load, LoadHowMuch (LoadAllTargets), Target (Target), TargetId (TargetModule, TargetFile))
 import GHC.Unit (mainUnit, GenericUnitInfo (unitId, unitIncludeDirs), lookupUnitId, rtsUnitId, mainUnitId, initUnits)
 import GHC.Driver.DynFlags (defaultDynFlags, initDynFlags, targetProfile)
 import qualified GHC.Driver.DynFlags as GHC
@@ -76,6 +76,7 @@ import GHC.SysTools (runAs)
 import qualified GHC.Driver.Session as GHC
 import GHC.Plugins (withAtomicRename)
 import GHC.Linker.Static (linkBinary)
+import GHC.Builtin.Names (rOOT_MAIN)
 
 main :: IO ()
 main = runAgda [backend]
@@ -170,7 +171,8 @@ runGenericAsPhase extra_opts with_cpp output_fn hsc_env location input_fn = do
         return output_fn
 
 stgPostModule :: StgOptions -> () -> IsMain -> TopLevelModuleName -> [(IsMain, Definition)] -> TCM ()
-stgPostModule opts _ isMain modName defs | NE.last (moduleNameParts modName) /= "Primitive" = do
+stgPostModule opts _ NotMain _ _ = pure () -- TODO
+stgPostModule opts _ IsMain modName defs = do
 
   liftIO $ putStrLn "postModule"
 
@@ -178,7 +180,7 @@ stgPostModule opts _ isMain modName defs | NE.last (moduleNameParts modName) /= 
       fileName  = prettyShow (NE.last $ moduleNameParts modName) ++ ".stg"
       asmFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".s"
       objectFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".o"
-      this_mod = mkModule mainUnit (mkModuleName (prettyShow modName))
+      this_mod = rOOT_MAIN -- mkModule mainUnit (mkModuleName (prettyShow modName))
 
   runToStgM opts this_mod $ do
     -- init
@@ -192,6 +194,9 @@ stgPostModule opts _ isMain modName defs | NE.last (moduleNameParts modName) /= 
     liftGhc $ setSessionDynFlags dflags { GHC.verbosity = 3 }
     logger <- liftGhc getLogger
     dflags <- liftGhc getSessionDynFlags
+
+    liftGhc $ setTargets [Target (TargetFile "hsbits/Main.hs" Nothing) True mainUnitId Nothing]
+    res <- liftGhc $ load LoadAllTargets
 
     -- Convert Agda definitions to STG
     -- TODO? stgPreamble
@@ -260,9 +265,9 @@ stgPostModule opts _ isMain modName defs | NE.last (moduleNameParts modName) /= 
     -- Add the object linkable to the potential bytecode linkable which was generated in HscBackend.
     -- return (mlinkable { homeMod_object = Just linkable })
 
-    liftIO $ linkBinary logger (hsc_tmpfs hsc_env) dflags (hsc_unit_env hsc_env) [object_file] []
+    -- liftIO $ linkBinary logger (hsc_tmpfs hsc_env) dflags (hsc_unit_env hsc_env) [object_file] []
 
-    return () -- $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
+    liftIO $ T.writeFile fileName $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
 
 -- THE PIPELINE
 

@@ -69,14 +69,14 @@ import Data.Unique (newUnique)
 import GHC.Cmm.UniqueRenamer (initDUniqSupply, runUniqueDSM, runUDSMT)
 import GHC.Driver.Session (updatePlatformConstants)
 import GHC.Prelude (pprTrace, pprTraceM)
-import GHC.Utils.Outputable (ppr)
+import GHC.Utils.Outputable (ppr, OutputableP (pdoc))
 import GHC.Driver.Pipeline (hscPostBackendPipeline, compileForeign)
 import GHC.Driver.Pipeline.Execute (compileStub)
 import GHC.SysTools (runAs)
 import qualified GHC.Driver.Session as GHC
 import GHC.Plugins (withAtomicRename)
 import GHC.Linker.Static (linkBinary)
-import GHC.Builtin.Names (rOOT_MAIN)
+import GHC.Builtin.Names (mkMainModule, mAIN_NAME, rOOT_MAIN)
 
 main :: IO ()
 main = runAgda [backend]
@@ -180,7 +180,7 @@ stgPostModule opts _ IsMain modName defs = do
       fileName  = prettyShow (NE.last $ moduleNameParts modName) ++ ".stg"
       asmFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".s"
       objectFileName = prettyShow (NE.last $ moduleNameParts modName) ++ ".o"
-      this_mod = rOOT_MAIN -- mkModule mainUnit (mkModuleName (prettyShow modName))
+      this_mod = rOOT_MAIN -- mkModule mainUnit mAIN_NAME -- (mkModuleName (prettyShow modName))
 
   runToStgM opts this_mod $ do
     -- init
@@ -224,7 +224,9 @@ stgPostModule opts _ IsMain modName defs = do
     --   Nothing -> liftIO $ putStrLn "nothing"
     --   Just u -> liftIO $ putStrLn $ show (unitIncludeDirs u)
     
-    !cmms <- liftIO $ doCodeGen hsc_env this_mod emptyInfoTableProvMap [] mempty stg_binds
+    tyCons <- gets (Map.elems . toStgTyCons)
+
+    !cmms <- liftIO $ doCodeGen hsc_env this_mod emptyInfoTableProvMap tyCons mempty stg_binds
     !rawccms0 <- liftIO $ cmmToRawCmm logger (targetProfile dflags) cmms
     
     !mod_basename <- liftIO $ encodeFS $ moduleNameSlashes $ moduleName this_mod
@@ -265,9 +267,12 @@ stgPostModule opts _ IsMain modName defs = do
     -- Add the object linkable to the potential bytecode linkable which was generated in HscBackend.
     -- return (mlinkable { homeMod_object = Just linkable })
 
-    -- liftIO $ linkBinary logger (hsc_tmpfs hsc_env) dflags (hsc_unit_env hsc_env) [object_file] []
+    liftIO $ T.writeFile fileName $! T.pack $ unlines $ map showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
+    
+    (cmmsList, _) <- liftIO $ runUDSMT duniqsupply (Stream.collect (() <$ cmms))
+    liftIO $ T.writeFile (fileName ++ ".cmm") $! T.pack $ unlines $ map (showSDocUnsafe . pdoc (GHC.targetPlatform dflags)) cmmsList
 
-    liftIO $ T.writeFile fileName $! T.pack $ concatMap showSDocUnsafe $ map (pprStgTopBinding (StgPprOpts False)) stg_binds
+    liftIO $ linkBinary logger (hsc_tmpfs hsc_env) dflags (hsc_unit_env hsc_env) [object_file] []
 
 -- THE PIPELINE
 

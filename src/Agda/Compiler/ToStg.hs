@@ -418,11 +418,11 @@ defToStg def
       Record{ recConHead = chead, recFields = fs } -> do
         -- TODO: processCon chead (length fs) True
         return Nothing
-      Constructor{} -> do
+      Constructor{conArity = n} -> do
         -- TODO: Figure out what to generate for constructors
-        -- ToStgCon c _ _ _ <- lookupStgCon f
-        -- return (Just (StgTopLifted (StgNonRec (dataConWorkId c) (StgRhsCon dontCareCCS c NoNumber [] [] anyTy))))
-        pure Nothing
+        ToStgCon c _ _ _ <- lookupStgCon f
+        withFreshVars n $ \xs ->
+          return (Just (StgTopLifted (StgNonRec (dataConWorkId c) (StgRhsClosure noExtFieldSilent dontCareCCS ReEntrant xs (StgConApp c NoNumber (map StgVarArg xs) []) anyTy))))
       AbstractDefn{} -> __IMPOSSIBLE__
       DataOrRecSig{} -> __IMPOSSIBLE__
 

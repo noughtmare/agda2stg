@@ -83,7 +83,7 @@ import Agda.Syntax.Common.Pretty (prettyShow)
 import GHC.Core.Multiplicity (Scaled(Scaled))
 import qualified GHC.Builtin.Names as GHC
 import Data.Foldable (for_)
-import GHC.Plugins (UnhelpfulSpanReason(UnhelpfulNoLocationInfo), mkLocalId, mkGlobalId, HscEnv (hsc_NC), fsLit, hsc_units, idName, showSDocUnsafe, Outputable (ppr))
+import GHC.Plugins (UnhelpfulSpanReason(UnhelpfulNoLocationInfo), mkLocalId, mkGlobalId, HscEnv (hsc_NC), fsLit, hsc_units, idName, showSDocUnsafe, Outputable (ppr), mkVisFunTysMany)
 import GHC.Base (Multiplicity(Many))
 import Debug.Trace (traceShow, traceWith, trace)
 import GHC.Types.Name.Cache (updateNameCache, extendOrigNameCache)
@@ -216,7 +216,6 @@ freshStgName ns n = do
   let !occ = mkOccName ns n
       loc = UnhelpfulSpan UnhelpfulNoLocationInfo
 
-  -- FIXME: it seems GHC wants global definitions and constructor names to be external
   pure (mkInternalName u occ loc)
 
 freshStgExternalName :: NameSpace -> String -> ToStgM GHC.Name
@@ -236,7 +235,6 @@ freshStgExternalName ns n = do
         cache' = extendOrigNameCache cache mod occ name'
     pure (cache', name')
 
-  -- FIXME: it seems GHC wants global definitions and constructor names to be external
   pure name
 
 liftedAny :: GHC.Type
@@ -264,6 +262,16 @@ withFreshVar' strat f = do
   x <- freshStgAtom
   local (addBinding x) $ f x
 
+withFreshVarU :: VarUse -> (StgAtom -> ToStgM a) -> ToStgM a
+withFreshVarU (MatchedAs q) f = do
+  name <- freshStgName GHC.varName "x"
+  c <- lookupStgTyCon q
+  let x = mkLocalId name manyDataConTy (mkTyConTy c)
+  local (addBinding x) $ f x
+withFreshVarU _ f = do
+  x <- freshStgAtom
+  local (addBinding x) $ f x
+
 withFreshVars :: Int -> ([StgAtom] -> ToStgM a) -> ToStgM a
 withFreshVars i f = do
   strat <- getEvaluationStrategy
@@ -273,6 +281,10 @@ withFreshVars' :: EvaluationStrategy -> Int -> ([StgAtom] -> ToStgM a) -> ToStgM
 withFreshVars' strat i f
   | i <= 0    = f []
   | otherwise = withFreshVar' strat $ \x -> withFreshVars' strat (i-1) (f . (x:))
+
+withFreshVarsU :: [VarUse] -> ([StgAtom] -> ToStgM a) -> ToStgM a
+withFreshVarsU [] f = f []
+withFreshVarsU (vu : vus) f = withFreshVarU vu $ \x -> withFreshVarsU vus (f . (x:))
 
 lookupStgDef :: QName -> ToStgM ToStgDef
 lookupStgDef n = do
@@ -314,6 +326,11 @@ makeStgName :: QName -> ToStgM StgAtom
 makeStgName n = do
   name <- freshStgExternalName GHC.varName (prettyShow (qnameName n)) 
   pure $ mkGlobalId VanillaId name liftedAny vanillaIdInfo
+
+makeStgNameTy :: QName -> GHC.Type -> ToStgM StgAtom
+makeStgNameTy n t = do
+  name <- freshStgExternalName GHC.varName (prettyShow (qnameName n)) 
+  pure $ mkGlobalId VanillaId name t vanillaIdInfo
 
 fourBitsToChar :: Int -> Char
 fourBitsToChar i
@@ -394,7 +411,7 @@ defToStg def
         tatom <- freshStgAtom -- GHC.tcName (prettyShow (qnameName (defName def)))
         let tname = GHC.Types.Var.varName tatom
         rname <- freshStgExternalName GHC.varName ("$tc" ++ prettyShow (qnameName (defName def)))
-        dataCons' <- for (zip [0..] cs) $ \(tag, c) -> do
+        dataCons' <- for (zip [1..] cs) $ \(tag, c) -> do
           cdef <- liftTCM $ getConstInfo c
           dname <- freshStgExternalName GHC.dataName (prettyShow (qnameName (defName cdef)))
           case theDef cdef of
@@ -418,21 +435,37 @@ defToStg def
       Record{ recConHead = chead, recFields = fs } -> do
         -- TODO: processCon chead (length fs) True
         return Nothing
-      Constructor{conArity = n} -> do
+      Constructor{conArity = n} | n == 0 -> do
         -- TODO: Figure out what to generate for constructors
         ToStgCon c _ _ _ <- lookupStgCon f
-        withFreshVars n $ \xs ->
-          return (Just (StgTopLifted (StgNonRec (dataConWorkId c) (StgRhsClosure noExtFieldSilent dontCareCCS ReEntrant xs (StgConApp c NoNumber (map StgVarArg xs) []) anyTy))))
+        return (Just (StgTopLifted (StgNonRec (dataConWorkId c) (StgRhsCon dontCareCCS c NoNumber [] [] liftedAny))))
+      Constructor{conArity = n} -> do
+        ToStgCon c _ _ _ <- lookupStgCon f
+        withFreshVars n $ \xs -> do
+          return (Just (StgTopLifted (StgNonRec (dataConWorkId c) (StgRhsClosure noExtFieldSilent dontCareCCS ReEntrant xs (StgConApp c NoNumber (map StgVarArg xs) []) liftedAny))))
       AbstractDefn{} -> __IMPOSSIBLE__
       DataOrRecSig{} -> __IMPOSSIBLE__
+
+varUseType :: VarUse -> ToStgM GHC.Type
+varUseType (MatchedAs q) = do
+  c <- lookupStgTyCon q
+  pure (mkTyConTy c)
+varUseType _ = pure liftedAny
 
 -- TODO: use bs
 topLevelStg :: [Bool] -> QName -> TTerm -> ToStgM StgTopBinding
 --ntopLevelStg _ f x | trace ("topLevelStg: " ++ prettyShow f ++ " ||| " ++ prettyShow x) False = undefined
 topLevelStg _bs f body = do
-  stgF <- makeStgName f
+  let (vars, body') = lambdaView' 0 (convertGuards body)
+  liftIO $ print vars
+  varTys <- traverse varUseType vars
+  stgF <- makeStgNameTy f (mkVisFunTysMany varTys liftedAny)
   setStgDef f (ToStgDef stgF (length _bs) _bs)
-  (StgTopLifted . StgNonRec stgF) <$> rhsStg (convertGuards body)
+  -- unless (length bs >= n) __IMPOSSIBLE__
+  withFreshVarsU vars $ \xs -> do
+    body'' <- uncurry appStg (tAppView body')
+    let !uf = if null vars then Updatable else ReEntrant
+    pure (StgTopLifted (StgNonRec stgF (StgRhsClosure noExtFieldSilent dontCareCCS uf xs body'' undefined {-(mkVisFunTysMany (replicate n anyTy) anyTy)-})))
 
 rhsStg :: TTerm -> ToStgM StgRhs
 -- rhsStg x | trace ("rhsStg: " ++ prettyShow x) False = undefined
@@ -442,7 +475,8 @@ rhsStg body = do
   withFreshVars n $ \xs -> do
     body'' <- uncurry appStg (tAppView body')
     let !uf = if n == 0 then Updatable else ReEntrant
-    pure (StgRhsClosure noExtFieldSilent dontCareCCS uf xs body'' liftedAny)
+    liftIO $ print n
+    pure (StgRhsClosure noExtFieldSilent dontCareCCS uf xs body'' undefined {-(mkVisFunTysMany (replicate n anyTy) anyTy)-})
 
 appStg :: TTerm -> [TTerm] -> ToStgM StgExpr
 -- appStg x xs | trace ("appStg: " ++ prettyShow x ++ " ||| " ++ prettyShow xs) False = undefined
@@ -484,7 +518,7 @@ appStg f args = bindsStg args $ \args' ->
       y <- traverse altStg xs
       fallback' <- appStg fallback []
       pure $ StgCase (StgApp x' []) unused at 
-        (if fallback == TError TUnreachable then y else GenStgAlt DEFAULT [] fallback' : y)
+        (case fallback of TError TUnreachable -> y; _ -> GenStgAlt DEFAULT [] fallback' : y)
     TUnit -> do
       unless (null args) __IMPOSSIBLE__
       pure $ StgApp unitDataConId []
@@ -497,7 +531,7 @@ appStg f args = bindsStg args $ \args' ->
 caseToAltType :: CaseType -> ToStgM AltType
 -- caseToAltType (CTData name) | trace ("caseToAltType: " ++ prettyShow name) False = undefined
 caseToAltType (CTData name) = AlgAlt <$> lookupStgTyCon name
-caseToAltType _ = __IMPOSSIBLE__ -- error "TODO: support non-algebraic matching"
+caseToAltType _ = __IMPOSSIBLE__
 
 altStg :: TAlt -> ToStgM StgAlt
 -- altStg (TACon name arity body) | trace ("altStg:" ++ prettyShow name ++ " ||| " ++ show arity ++ " ||| " ++ prettyShow body) False = undefined
@@ -507,6 +541,7 @@ altStg (TACon name arity body) = do
     GenStgAlt (DataAlt con) vars <$> appStg body []
 altStg _ = __IMPOSSIBLE__ -- we have already converted guards and eliminated literal patterns
 
+-- TODO: use StgArg instead of StgAtom
 -- TODO OPT: collect let bindings, avoid nested lets
 bindStg :: TTerm -> (StgAtom -> ToStgM StgExpr) -> ToStgM StgExpr
 -- bindStg x _ | trace ("bindStg: " ++ prettyShow x) False = undefined
@@ -540,6 +575,40 @@ litStg lit = case lit of
     LitChar   x -> return $ StgLit (GHCLit.LitChar x)
     LitQName  _ -> return __IMPOSSIBLE__
     LitMeta _ _ -> return __IMPOSSIBLE__
+
+lambdaView' :: Int -> TTerm -> ([VarUse], TTerm)
+lambdaView' i v = case v of
+  TLam w -> lambdaView' (i + 1) w
+  TCoerce w -> lambdaView' i w
+  x -> (reverse (take i (varUses x)), x)
+
+data VarUse = Unmatched | MatchedAs QName | Confused deriving Show
+
+combine :: VarUse -> VarUse -> VarUse
+combine Unmatched x = x
+combine x Unmatched = x
+combine (MatchedAs x) (MatchedAs y) | x == y = MatchedAs x
+combine _ _ = Confused
+
+varUses :: TTerm -> [VarUse]
+-- varUses x | traceShow ("varUses", x) False = undefined
+varUses (TCase j (CaseInfo _ _ (CTData c)) _ _) = replicate j Unmatched ++ [MatchedAs c] ++ repeat Unmatched
+varUses TCase{} = repeat Unmatched
+varUses (TApp x y) = zipWith combine (varUses x) (foldr (zipWith combine) (repeat Unmatched) (map varUses y))
+varUses (TLam x) = tail (varUses x)
+varUses (TLet x y) = zipWith combine (varUses x) (tail (varUses y))
+varUses TVar{} = repeat Unmatched
+varUses TPrim{} = repeat Unmatched
+varUses TLit{} = repeat Unmatched
+varUses TDef{} = repeat Unmatched
+varUses TCon{} = repeat Unmatched
+varUses TUnit{} = repeat Unmatched
+varUses TSort{} = repeat Unmatched
+varUses TErased{} = repeat Unmatched
+varUses (TCoerce x) = varUses x
+varUses TError{} = repeat Unmatched
+
+-- varUses _ = repeat Unmatched
 
 lambdaView :: TTerm -> (Int, TTerm)
 lambdaView v = case v of

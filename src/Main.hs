@@ -191,7 +191,7 @@ stgPostModule opts _ IsMain modName defs = do
     --   Just info -> liftIO $ putStrLn $ lookupPlatformConstants (fmap ST.unpack (unitIncludeDirs info))
 
     dflags <- liftGhc getSessionDynFlags
-    liftGhc $ setSessionDynFlags dflags { GHC.verbosity = 3 }
+    liftGhc $ setSessionDynFlags (GHC.dopt_set dflags { GHC.verbosity = 3 } GHC.Opt_D_dump_cmm_from_stg)
     logger <- liftGhc getLogger
     dflags <- liftGhc getSessionDynFlags
 
@@ -201,11 +201,10 @@ stgPostModule opts _ IsMain modName defs = do
     -- Convert Agda definitions to STG
     -- TODO? stgPreamble
     stg_binds <- catMaybes <$> traverse (\x -> {- liftIO (putStrLn "another def") >> -} defToStg x) (map snd defs)
-    liftIO $ putStrLn "Done generating STG"
 
     -- Rest of the GHC pipeline
 
-    liftIO $ print $ GHC.Data.EnumSet.toList (GHC.generalFlags dflags)
+    -- liftIO $ print $ GHC.Data.EnumSet.toList (GHC.generalFlags dflags)
 
     let
       ic_inscope = [] -- in-scope variables from GHCi 

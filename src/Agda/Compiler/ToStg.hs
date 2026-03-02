@@ -3,58 +3,42 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Agda.Compiler.ToStg where
 
-import qualified Data.List as List
 import Prelude hiding (null, empty, mod)
 
 
 import qualified GHC
 import qualified GHC.Driver.Monad as GHC
-import qualified GHC.Unit.Module as GHC
 
-import qualified Control.Exception as ControlException
 import Control.Monad.Catch
 
-import Agda.Compiler.Common
 import Agda.Compiler.Erase ( runE , erasable , getFunInfo )
 import Agda.Compiler.ToTreeless
-import Agda.Compiler.Treeless.EliminateLiteralPatterns
-import Agda.Compiler.Treeless.Erase
 import Agda.Compiler.Treeless.GuardsToPrims
 
 import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Common
-import qualified Agda.Syntax.Internal as I
 import Agda.Syntax.Literal
 import Agda.Syntax.Treeless
 
 import Agda.TypeChecking.Monad hiding (liftTCM)
-import Agda.TypeChecking.Pretty
-import Agda.TypeChecking.Primitive.Base
 
 import Agda.Utils.Impossible
 import Agda.Utils.Lens
-import Agda.Utils.List hiding ((!!))
-import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Null
 import qualified Agda.Syntax.Common.Pretty as P
-import Agda.Utils.Singleton
 
-import Control.Arrow ( first , second )
+import Control.Arrow ( first  )
 import Control.DeepSeq ( NFData )
 
-import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 
 import Data.Char
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as T
 
 import GHC.Generics ( Generic )
 import GHC.Stg.Syntax
@@ -63,32 +47,33 @@ import GHC.Types.CostCentre (dontCareCCS)
 import GHC.Builtin.Types
 import GHC.Core.TyCon
 import qualified GHC.Types.Literal as GHCLit
-import Data.String (fromString)
 import Data.Text.Encoding (encodeUtf8)
-import GHC.Stg.Lift.Monad (mkStgBinding)
-import Control.Monad (replicateM)
-import GHC.Types.Id.Info (IdDetails(DataConWrapId, VanillaId), vanillaIdInfo)
-import GHC.Core.DataCon (dataConWorkId, DataCon, dataConTyCon, mkDataCon, DataConRep (NoDataConRep), dataConWrapId)
+import GHC.Types.Id.Info (IdDetails(VanillaId), vanillaIdInfo)
+import GHC.Core.DataCon (dataConWorkId, DataCon, mkDataCon, DataConRep (NoDataConRep))
 import GHC.Core
-import GHC.Types.Basic
-import GHC.Core.TyCon (mkAlgTyCon, mkDataTyConRhs, AlgTyConFlav (VanillaAlgTyCon), PromDataConInfo (NoPromInfo))
-import GHC (typeKind, Name, SrcSpan (UnhelpfulSpan))
-import GHC.Tc.TyCl.Build (newTyConRepName)
+import GHC (Name, SrcSpan (UnhelpfulSpan))
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Id.Make (mkDataConWorkId)
 import Data.Traversable (for)
-import GHC.Types.Name as GHC (mkInternalName, mkOccName, varName, NameSpace, tcName, dataName, mkExternalName, nameOccName, mkVarOcc)
+import GHC.Types.Name as GHC (mkInternalName, mkOccName, varName, NameSpace, dataName, mkExternalName)
 import qualified GHC.Core.TyCon as GHC
 import Agda.Syntax.Common.Pretty (prettyShow)
 import GHC.Core.Multiplicity (Scaled(Scaled))
-import qualified GHC.Builtin.Names as GHC
 import Data.Foldable (for_)
-import GHC.Plugins (UnhelpfulSpanReason(UnhelpfulNoLocationInfo), mkLocalId, mkGlobalId, HscEnv (hsc_NC), fsLit, hsc_units, idName, showSDocUnsafe, Outputable (ppr), mkVisFunTysMany)
-import GHC.Base (Multiplicity(Many))
-import Debug.Trace (traceShow, traceWith, trace)
 import GHC.Types.Name.Cache (updateNameCache, extendOrigNameCache)
-import GHC.Types.TyThing (MonadThings(lookupId))
-import qualified GHC.Unit as GHC
+import GHC.Iface.Load
+import GHC.Tc.Utils.Monad
+import GHC.Data.Maybe
+import GHC.Tc.Module
+import qualified GHC.Types.SrcLoc as GHC
+import qualified GHC.Driver.Env as GHC
+import qualified GHC.Types.Id as GHC
+import qualified GHC.Types.PkgQual as GHC
+import qualified GHC.Driver.Ppr as GHC
+import qualified GHC.Utils.Outputable as GHC
+import qualified GHC.Types.Name.Reader as GHC
+import qualified GHC.Core.Type as GHC
+import qualified GHC.Types.SourceText as GHC
 
 type StgAtom = Id
 instance Show StgAtom where
@@ -205,7 +190,8 @@ runToStgM :: StgOptions -> GHC.Module -> ToStgM a -> TCM a
 runToStgM opts mod x = do
   let e = initToStgEnv opts mod
   s <- liftIO initToStgState
-  GHC.runGhcT Nothing (runReaderT (evalStateT x s) e)
+  -- TODO: run 'ghc --print-libdir'
+  GHC.runGhcT (Just "/Users/jaro/.ghcup/ghc/9.12.2/lib/ghc-9.12.2/lib") (runReaderT (evalStateT x s) e)
 
 freshStgName :: NameSpace -> String -> ToStgM GHC.Name
 freshStgName ns n = do
@@ -214,7 +200,7 @@ freshStgName ns n = do
   put s { toStgUniqSupply = us' }
 
   let !occ = mkOccName ns n
-      loc = UnhelpfulSpan UnhelpfulNoLocationInfo
+      loc = UnhelpfulSpan GHC.UnhelpfulNoLocationInfo
 
   pure (mkInternalName u occ loc)
 
@@ -226,11 +212,11 @@ freshStgExternalName ns n = do
   put s { toStgUniqSupply = us' }
 
   let occ = mkOccName ns n
-      loc = UnhelpfulSpan UnhelpfulNoLocationInfo
+      loc = UnhelpfulSpan GHC.UnhelpfulNoLocationInfo
       uniq = u
   occ `seq` return ()  -- c.f. seq in newGlobalBinder
   hsc_env <- liftGhc $ GHC.getSession
-  name <- liftIO $ updateNameCache (hsc_NC hsc_env) mod occ $ \cache -> do
+  name <- liftIO $ updateNameCache (GHC.hsc_NC hsc_env) mod occ $ \cache -> do
     let name'  = mkExternalName uniq mod occ loc
         cache' = extendOrigNameCache cache mod occ name'
     pure (cache', name')
@@ -243,7 +229,7 @@ liftedAny = anyTypeOfKind liftedTypeKind
 freshStgAtom :: ToStgM StgAtom
 freshStgAtom = do
   name <- freshStgName GHC.varName "x"
-  pure (mkLocalId name manyDataConTy liftedAny)
+  pure (GHC.mkLocalId name manyDataConTy liftedAny)
 
 getEvaluationStrategy :: ToStgM EvaluationStrategy
 getEvaluationStrategy = reader $ stgEvaluation . toStgOptions
@@ -266,7 +252,7 @@ withFreshVarU :: VarUse -> (StgAtom -> ToStgM a) -> ToStgM a
 withFreshVarU (MatchedAs q) f = do
   name <- freshStgName GHC.varName "x"
   c <- lookupStgTyCon q
-  let x = mkLocalId name manyDataConTy (mkTyConTy c)
+  let x = GHC.mkLocalId name manyDataConTy (mkTyConTy c)
   local (addBinding x) $ f x
 withFreshVarU _ f = do
   x <- freshStgAtom
@@ -325,12 +311,12 @@ setStgTyCon n tycon = do
 makeStgName :: QName -> ToStgM StgAtom
 makeStgName n = do
   name <- freshStgExternalName GHC.varName (prettyShow (qnameName n)) 
-  pure $ mkGlobalId VanillaId name liftedAny vanillaIdInfo
+  pure $ GHC.mkGlobalId VanillaId name liftedAny vanillaIdInfo
 
 makeStgNameTy :: QName -> GHC.Type -> ToStgM StgAtom
 makeStgNameTy n t = do
   name <- freshStgExternalName GHC.varName (prettyShow (qnameName n)) 
-  pure $ mkGlobalId VanillaId name t vanillaIdInfo
+  pure $ GHC.mkGlobalId VanillaId name t vanillaIdInfo
 
 fourBitsToChar :: Int -> Char
 fourBitsToChar i
@@ -344,6 +330,22 @@ class ToStg a b | a -> b where
 liftTCM :: TCM a -> ToStgM a
 liftTCM = lift . lift . lift
 
+simpleImportDecl :: String -> GHC.ImportDecl GHC.GhcPs
+simpleImportDecl md_name = GHC.ImportDecl {
+              ideclExt = GHC.XImportDeclPass {
+                  ideclImplicit = False
+                , ideclAnn = GHC.noAnn
+                , ideclSourceText = GHC.NoSourceText
+              }
+            , ideclName = GHC.L GHC.noAnn (GHC.mkModuleName md_name)
+            , ideclPkgQual = GHC.NoRawPkgQual
+            , ideclSource = GHC.NotBoot
+            , ideclSafe = False
+            , ideclQualified = GHC.NotQualified
+            , ideclAs = Nothing
+            , ideclImportList = Nothing
+          }
+
 -- We first convert all definitions to treeless and calculate their
 -- arity and erasure info, before doing the actual translation to Stg.
 defToStg :: Definition -> ToStgM (Maybe StgTopBinding)
@@ -352,34 +354,26 @@ defToStg def
     not (usableModality $ getModality def) = return Nothing
   | otherwise = do
     let f = defName def
-    -- liftIO $ putStrLn $ "Compiling definition: " <> prettyShow f
-    -- reportSDoc "toStg" 5 $ "Compiling definition:" <> prettyTCM f
     case theDef def of
       Axiom{} -> do
-        -- f' <- newStgDef f 0 []
-        -- TODO
-
         when (prettyShow (qnameName (defName def)) == "interact") $ do
-          liftIO $ putStrLn "Found 'interact' axiom!"
+          -- liftIO $ putStrLn "Found 'interact' axiom!"
           hsc_env <- liftGhc GHC.getSession
-          -- FIXME: This is not how it should be done!
-          liftIO $ putStrLn $ show $ GHC.ghcInternalUnit
-          let ((preludeMod,_):_) = GHC.lookupModuleInAllUnits (hsc_units hsc_env) (GHC.mkModuleName "GHC.Internal.System.IO")
-          preludeInf <- liftGhc $ GHC.getModuleInfo preludeMod
-          case preludeInf of
-            Nothing -> liftIO $ putStrLn "NOTHING!!!"
-            Just preludeInf -> do
-              let preludeIds = mapMaybe (\case GHC.AnId x -> Just x; _ -> Nothing) (GHC.modInfoTyThings preludeInf)
-              liftIO $ print preludeIds
-              case List.find (\x -> nameOccName (idName x) == mkVarOcc "interact") preludeIds of
-                Nothing -> liftIO $ putStrLn "STILL NOTHING!!!!!!"
-                Just interactTyThing -> do
-                  s <- get
-                  put s { toStgDefs = Map.insert (defName def) (ToStgDef (interactTyThing) 1 [False]) (toStgDefs s) }
-          -- minf_exports preludeInf
-          -- interactId <- liftGhc (lookupId _)
-          -- s <- get
-          pure ()
+          (msgs, mayRdrEnv) <- liftIO $ tcRnImportDecls hsc_env [GHC.L GHC.noSrcSpanA (simpleImportDecl "Prelude")]
+          case mayRdrEnv of
+          { Nothing -> error (unlines ["Failed to import the Prelude module:", GHC.showSDocUnsafe (GHC.ppr msgs)])
+          ; Just rdrEnv ->
+          case map GHC.greName $ GHC.lookupGRE rdrEnv (GHC.LookupOccName (GHC.mkOccName GHC.varName "interact") GHC.SameNameSpace) of
+          { [] -> error "No names found for 'interact'"
+          ; _:_:_ -> error "Multiple names found for 'interact'"
+          ; [nm] -> do
+          res <- liftIO $ initIfaceLoad hsc_env $ importDecl nm
+          case res of
+            Succeeded (GHC.AnId theId) -> do
+              s <- get
+              put s { toStgDefs = Map.insert (defName def) (ToStgDef theId 1 [False]) (toStgDefs s) }
+            _ -> error "Cannot import 'interact' from interface"
+          }}
         pure Nothing
       GeneralizableVar{} -> return Nothing
       d@Function{} | d ^. funInline -> return Nothing
@@ -457,9 +451,9 @@ topLevelStg :: [Bool] -> QName -> TTerm -> ToStgM StgTopBinding
 --ntopLevelStg _ f x | trace ("topLevelStg: " ++ prettyShow f ++ " ||| " ++ prettyShow x) False = undefined
 topLevelStg _bs f body = do
   let (vars, body') = lambdaView' 0 (convertGuards body)
-  liftIO $ print vars
+  -- liftIO $ print vars
   varTys <- traverse varUseType vars
-  stgF <- makeStgNameTy f (mkVisFunTysMany varTys liftedAny)
+  stgF <- makeStgNameTy f (GHC.mkVisFunTysMany varTys liftedAny)
   setStgDef f (ToStgDef stgF (length _bs) _bs)
   -- unless (length bs >= n) __IMPOSSIBLE__
   withFreshVarsU vars $ \xs -> do
@@ -475,7 +469,7 @@ rhsStg body = do
   withFreshVars n $ \xs -> do
     body'' <- uncurry appStg (tAppView body')
     let !uf = if n == 0 then Updatable else ReEntrant
-    liftIO $ print n
+    -- liftIO $ print n
     pure (StgRhsClosure noExtFieldSilent dontCareCCS uf xs body'' undefined {-(mkVisFunTysMany (replicate n anyTy) anyTy)-})
 
 appStg :: TTerm -> [TTerm] -> ToStgM StgExpr
